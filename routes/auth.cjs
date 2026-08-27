@@ -1,9 +1,7 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
-const nodemailer = require("nodemailer");
 
 const User = require("../models/User.cjs");
 
@@ -42,122 +40,8 @@ function publicUser(user) {
     name: user.name,
     picture: user.picture || "",
     avatar: user.picture || "",
-    emailVerified: user.emailVerified,
+    emailVerified: user.emailVerified !== false,
   };
-}
-
-function getEmailHtml(code) {
-  return `
-    <div style="
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 500px;
-      margin: 40px auto;
-      padding: 30px;
-      border-radius: 20px;
-      background: #0f1426;
-      color: #f4efe3;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      text-align: center;
-    ">
-      <div style="font-size: 36px; margin-bottom: 10px;">🌙</div>
-      <h2 style="color: #ffffff; margin-bottom: 8px;">
-        Welcome to Ananda
-      </h2>
-      <p style="color: rgba(255, 255, 255, 0.7); font-size: 14px; margin-bottom: 24px;">
-        Your sanctuary for peace of mind. Enter this verification code to complete your signup:
-      </p>
-
-      <div style="
-        letter-spacing: 10px;
-        color: #f59e0b;
-        font-size: 32px;
-        font-weight: bold;
-        background: rgba(255, 255, 255, 0.05);
-        padding: 16px;
-        border-radius: 12px;
-        border: 1px dashed rgba(245, 158, 11, 0.4);
-        margin: 20px 0;
-      ">
-        ${code}
-      </div>
-
-      <p style="color: rgba(255, 255, 255, 0.5); font-size: 12px; margin-top: 20px;">
-        This code expires in 10 minutes.
-      </p>
-
-      <p style="color: rgba(255, 255, 255, 0.3); font-size: 11px; margin-top: 30px;">
-        If you did not request this code, you can safely ignore this email.
-      </p>
-    </div>
-  `;
-}
-
-/* -----------------------------
-   SEND VERIFICATION EMAIL
------------------------------ */
-
-async function sendVerificationEmail(email, code) {
-  // Option 1: Resend API
-  if (process.env.RESEND_API_KEY) {
-    try {
-      const response = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-        },
-        body: JSON.stringify({
-          from: "Ananda <onboarding@resend.dev>",
-          to: [email],
-          subject: "Your Ananda verification code",
-          html: getEmailHtml(code),
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log("Verification email sent via Resend:", data.id);
-        return data;
-      }
-    } catch (err) {
-      console.warn("Resend email failed:", err.message);
-    }
-  }
-
-  // Option 2: Nodemailer (SMTP / Gmail / mail.com)
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
-    try {
-      const isGmail = process.env.EMAIL_USER.includes("gmail.com");
-      const transporter = nodemailer.createTransport({
-        service: isGmail ? "gmail" : undefined,
-        host: process.env.EMAIL_HOST || (isGmail ? "smtp.gmail.com" : "smtp.mail.com"),
-        port: Number(process.env.EMAIL_PORT) || 587,
-        secure: false,
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD,
-        },
-      });
-
-      const info = await transporter.sendMail({
-        from: `"Ananda" <${process.env.EMAIL_USER}>`,
-        to: email,
-        subject: "Your Ananda verification code",
-        html: getEmailHtml(code),
-      });
-
-      console.log("Verification email sent via Nodemailer:", info.messageId);
-      return info;
-    } catch (err) {
-      console.warn("Nodemailer email failed:", err.message);
-    }
-  }
-
-  // Fallback: Simulation in development mode
-  console.log(`\n========================================`);
-  console.log(`[ANANDA VERIFICATION CODE for ${email}]: ${code}`);
-  console.log(`========================================\n`);
-  return { simulated: true, code };
 }
 
 /* -----------------------------
@@ -242,6 +126,7 @@ router.post("/google", async (req, res) => {
 
 /* -----------------------------
    EMAIL SIGN UP / REGISTER
+   Instant registration without OTP blocker
 ----------------------------- */
 
 router.post(["/register", "/signup"], async (req, res) => {
@@ -268,56 +153,23 @@ router.post(["/register", "/signup"], async (req, res) => {
 
     if (existingUser) {
       return res.status(409).json({
-        message: "An account with this email already exists",
+        message: "An account with this email already exists. Please sign in.",
       });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const verificationCode = crypto
-      .randomInt(100000, 1000000)
-      .toString();
-
-    const verificationCodeHash = crypto
-      .createHash("sha256")
-      .update(verificationCode)
-      .digest("hex");
-
-    const hasEmailConfig = !!(process.env.RESEND_API_KEY || (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD));
-
     const user = await User.create({
       email: normalizedEmail,
       name: name.trim(),
       passwordHash,
-      emailVerified: !hasEmailConfig, // Auto-verify if no email provider is configured
-      verificationCodeHash: hasEmailConfig ? verificationCodeHash : null,
-      verificationExpiresAt: hasEmailConfig
-        ? new Date(Date.now() + 10 * 60 * 1000)
-        : null,
+      emailVerified: true,
     });
 
-    if (hasEmailConfig) {
-      try {
-        await sendVerificationEmail(normalizedEmail, verificationCode);
-        return res.status(201).json({
-          message: "Account created. Check your email for the verification code.",
-          requiresVerification: true,
-          userId: user._id.toString(),
-        });
-      } catch (emailError) {
-        console.error("Verification email sending failed:", emailError);
-        // Don't delete user; auto-verify as graceful fallback
-        user.emailVerified = true;
-        user.verificationCodeHash = null;
-        user.verificationExpiresAt = null;
-        await user.save();
-      }
-    }
-
     const token = createToken(user);
+
     return res.status(201).json({
       message: "Account created successfully",
-      requiresVerification: false,
       token,
       user: publicUser(user),
     });
@@ -326,70 +178,6 @@ router.post(["/register", "/signup"], async (req, res) => {
 
     return res.status(500).json({
       message: error.message || "Could not create account",
-    });
-  }
-});
-
-/* -----------------------------
-   VERIFY EMAIL
------------------------------ */
-
-router.post(["/verify-email", "/verify"], async (req, res) => {
-  try {
-    const { userId, code } = req.body || {};
-
-    if (!userId || !code) {
-      return res.status(400).json({
-        message: "User ID and verification code are required",
-      });
-    }
-
-    const user = await User.findById(userId);
-
-    if (!user) {
-      return res.status(404).json({
-        message: "User not found",
-      });
-    }
-
-    if (
-      !user.verificationExpiresAt ||
-      user.verificationExpiresAt < new Date()
-    ) {
-      return res.status(400).json({
-        message: "Verification code has expired",
-      });
-    }
-
-    const hashedCode = crypto
-      .createHash("sha256")
-      .update(code.toString())
-      .digest("hex");
-
-    if (hashedCode !== user.verificationCodeHash) {
-      return res.status(400).json({
-        message: "Invalid verification code",
-      });
-    }
-
-    user.emailVerified = true;
-    user.verificationCodeHash = null;
-    user.verificationExpiresAt = null;
-
-    await user.save();
-
-    const token = createToken(user);
-
-    return res.json({
-      message: "Email verified successfully",
-      token,
-      user: publicUser(user),
-    });
-  } catch (error) {
-    console.error("Email verification error:", error);
-
-    return res.status(500).json({
-      message: "Could not verify email",
     });
   }
 });
@@ -414,7 +202,19 @@ router.post(["/login", "/signin"], async (req, res) => {
       email: normalizedEmail,
     });
 
-    if (!user || !user.passwordHash) {
+    if (!user) {
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
+    }
+
+    if (!user.passwordHash && user.googleId) {
+      return res.status(400).json({
+        message: "This account was registered with Google. Please use 'Sign in with Google'.",
+      });
+    }
+
+    if (!user.passwordHash) {
       return res.status(401).json({
         message: "Invalid email or password",
       });
@@ -428,14 +228,6 @@ router.post(["/login", "/signin"], async (req, res) => {
     if (!passwordCorrect) {
       return res.status(401).json({
         message: "Invalid email or password",
-      });
-    }
-
-    if (!user.emailVerified) {
-      return res.status(403).json({
-        message: "Please verify your email first",
-        requiresVerification: true,
-        userId: user._id.toString(),
       });
     }
 
@@ -456,7 +248,7 @@ router.post(["/login", "/signin"], async (req, res) => {
 });
 
 /* -----------------------------
-   CURRENT USER
+   CURRENT USER (/me)
 ----------------------------- */
 
 router.get("/me", async (req, res) => {
