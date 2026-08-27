@@ -1,6 +1,5 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
-const bcrypt = require("bcryptjs");
 const { OAuth2Client } = require("google-auth-library");
 
 const User = require("../models/User.cjs");
@@ -24,7 +23,7 @@ function createToken(user) {
     },
     JWT_SECRET,
     {
-      expiresIn: "7d",
+      expiresIn: "30d",
     }
   );
 }
@@ -41,11 +40,13 @@ function publicUser(user) {
     picture: user.picture || "",
     avatar: user.picture || "",
     emailVerified: user.emailVerified !== false,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
   };
 }
 
 /* -----------------------------
-   GOOGLE LOGIN
+   GOOGLE LOGIN / REGISTRATION
 ----------------------------- */
 
 router.post("/google", async (req, res) => {
@@ -92,183 +93,103 @@ router.post("/google", async (req, res) => {
       email: normalizedEmail,
     });
 
+    let isNewUser = false;
+
     if (!user) {
       user = await User.create({
         googleId,
         email: normalizedEmail,
-        name: name || "Ananda User",
+        name: name || "Ananda Villager",
         picture: picture || "",
         emailVerified: true,
       });
+      isNewUser = true;
     } else {
       user.googleId = googleId;
-      user.name = name || user.name;
-      user.picture = picture || user.picture;
+      if (!user.name || user.name === "Ananda User") {
+        user.name = name || user.name;
+      }
+      if (picture && (!user.picture || user.picture.includes("googleusercontent.com"))) {
+        user.picture = picture;
+      }
       user.emailVerified = true;
-
       await user.save();
     }
 
     const token = createToken(user);
+    const totalUsers = await User.countDocuments();
 
     return res.json({
+      message: isNewUser ? "Welcome to Ananda!" : "Welcome back to Ananda!",
       token,
       user: publicUser(user),
+      isNewUser,
+      totalUsers,
     });
   } catch (error) {
     console.error("Google authentication error:", error);
 
     return res.status(401).json({
-      message: "Google authentication failed",
+      message: error.message || "Google authentication failed",
     });
   }
 });
 
 /* -----------------------------
-   EMAIL SIGN UP / REGISTER
+   UPDATE PROFILE (Edit Name)
 ----------------------------- */
 
-router.post(["/register", "/signup"], async (req, res) => {
+router.patch("/profile", async (req, res) => {
   try {
-    const { name, email, password } = req.body || {};
-
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        message: "Name, email and password are required",
-      });
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Not authenticated" });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({
-        message: "Password must be at least 6 characters",
-      });
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const { name, picture } = req.body || {};
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Name cannot be empty" });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-
-    let existingUser = await User.findOne({
-      email: normalizedEmail,
-    });
-
-    if (existingUser) {
-      // If user signed in with Google previously and has no password yet, set their password
-      if (!existingUser.passwordHash) {
-        const passwordHash = await bcrypt.hash(password, 10);
-        existingUser.passwordHash = passwordHash;
-        existingUser.name = name.trim() || existingUser.name;
-        existingUser.emailVerified = true;
-        await existingUser.save();
-
-        const token = createToken(existingUser);
-        return res.status(200).json({
-          message: "Password linked to your account successfully",
-          token,
-          user: publicUser(existingUser),
-        });
-      }
-
-      // If user already has a password, check if password matches
-      const passwordCorrect = await bcrypt.compare(password, existingUser.passwordHash);
-      if (passwordCorrect) {
-        const token = createToken(existingUser);
-        return res.status(200).json({
-          message: "Signed in to existing account",
-          token,
-          user: publicUser(existingUser),
-        });
-      }
-
-      return res.status(409).json({
-        message: "An account with this email already exists. Please sign in.",
-      });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const user = await User.create({
-      email: normalizedEmail,
-      name: name.trim(),
-      passwordHash,
-      emailVerified: true,
-    });
-
-    const token = createToken(user);
-
-    return res.status(201).json({
-      message: "Account created successfully",
-      token,
-      user: publicUser(user),
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-
-    return res.status(500).json({
-      message: error.message || "Could not create account",
-    });
-  }
-});
-
-/* -----------------------------
-   EMAIL LOGIN
------------------------------ */
-
-router.post(["/login", "/signin"], async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password are required",
-      });
-    }
-
-    const normalizedEmail = email.toLowerCase().trim();
-
-    const user = await User.findOne({
-      email: normalizedEmail,
-    });
-
+    const user = await User.findById(decoded.userId);
     if (!user) {
-      return res.status(401).json({
-        message: "Invalid email or password",
-      });
+      return res.status(404).json({ message: "User not found" });
     }
 
-    if (!user.passwordHash && user.googleId) {
-      return res.status(400).json({
-        message: "This account was registered with Google. Please use 'Sign in with Google' or set a password via Create Account.",
-      });
-    }
-
-    if (!user.passwordHash) {
-      return res.status(401).json({
-        message: "Invalid email or password",
-      });
-    }
-
-    const passwordCorrect = await bcrypt.compare(
-      password,
-      user.passwordHash
-    );
-
-    if (!passwordCorrect) {
-      return res.status(401).json({
-        message: "Invalid email or password",
-      });
-    }
-
-    const token = createToken(user);
+    user.name = name.trim();
+    if (picture) user.picture = picture;
+    await user.save();
 
     return res.json({
-      message: "Signed in successfully",
-      token,
+      message: "Profile updated successfully",
       user: publicUser(user),
     });
   } catch (error) {
-    console.error("Login error:", error);
+    return res.status(401).json({
+      message: error.message || "Failed to update profile",
+    });
+  }
+});
 
+/* -----------------------------
+   GET STATS (Unique Users Count)
+----------------------------- */
+
+router.get("/stats", async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    return res.json({
+      totalUsers,
+      status: "ok",
+    });
+  } catch (error) {
     return res.status(500).json({
-      message: "Login failed",
+      totalUsers: 1,
+      error: error.message,
     });
   }
 });
