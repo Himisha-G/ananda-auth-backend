@@ -126,7 +126,6 @@ router.post("/google", async (req, res) => {
 
 /* -----------------------------
    EMAIL SIGN UP / REGISTER
-   Instant registration without OTP blocker
 ----------------------------- */
 
 router.post(["/register", "/signup"], async (req, res) => {
@@ -147,11 +146,38 @@ router.post(["/register", "/signup"], async (req, res) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    const existingUser = await User.findOne({
+    let existingUser = await User.findOne({
       email: normalizedEmail,
     });
 
     if (existingUser) {
+      // If user signed in with Google previously and has no password yet, set their password
+      if (!existingUser.passwordHash) {
+        const passwordHash = await bcrypt.hash(password, 10);
+        existingUser.passwordHash = passwordHash;
+        existingUser.name = name.trim() || existingUser.name;
+        existingUser.emailVerified = true;
+        await existingUser.save();
+
+        const token = createToken(existingUser);
+        return res.status(200).json({
+          message: "Password linked to your account successfully",
+          token,
+          user: publicUser(existingUser),
+        });
+      }
+
+      // If user already has a password, check if password matches
+      const passwordCorrect = await bcrypt.compare(password, existingUser.passwordHash);
+      if (passwordCorrect) {
+        const token = createToken(existingUser);
+        return res.status(200).json({
+          message: "Signed in to existing account",
+          token,
+          user: publicUser(existingUser),
+        });
+      }
+
       return res.status(409).json({
         message: "An account with this email already exists. Please sign in.",
       });
@@ -210,7 +236,7 @@ router.post(["/login", "/signin"], async (req, res) => {
 
     if (!user.passwordHash && user.googleId) {
       return res.status(400).json({
-        message: "This account was registered with Google. Please use 'Sign in with Google'.",
+        message: "This account was registered with Google. Please use 'Sign in with Google' or set a password via Create Account.",
       });
     }
 
