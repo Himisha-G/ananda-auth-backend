@@ -85,14 +85,16 @@ router.post("/google", async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     let user = await User.findOne({
-      email: email.toLowerCase(),
+      email: normalizedEmail,
     });
 
     if (!user) {
       user = await User.create({
         googleId,
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         name: name || "Ananda User",
         picture: picture || "",
         emailVerified: true,
@@ -127,7 +129,7 @@ router.post("/google", async (req, res) => {
 
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password } = req.body || {};
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -166,26 +168,46 @@ router.post("/register", async (req, res) => {
 
     const user = await User.create({
       email: normalizedEmail,
-      name,
+      name: name.trim(),
       passwordHash,
       emailVerified: false,
       verificationCodeHash,
-      verificationExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      verificationExpiresAt: new Date(
+        Date.now() + 10 * 60 * 1000
+      ),
     });
 
-    await sendVerificationEmail(
-      normalizedEmail,
-      verificationCode
-    );
+    try {
+      await sendVerificationEmail(
+        normalizedEmail,
+        verificationCode
+      );
+    } catch (emailError) {
+      console.error(
+        "Verification email failed:",
+        emailError
+      );
 
-    res.status(201).json({
-      message: "Account created. Check your email for the verification code.",
+      // Remove the user if email could not be sent.
+      // This prevents a half-created account that
+      // cannot receive its verification code.
+      await User.findByIdAndDelete(user._id);
+
+      return res.status(500).json({
+        message:
+          "Could not send verification email. Please try again.",
+      });
+    }
+
+    return res.status(201).json({
+      message:
+        "Account created. Check your email for the verification code.",
       userId: user._id,
     });
   } catch (error) {
     console.error("Registration error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Could not create account",
     });
   }
@@ -197,7 +219,7 @@ router.post("/register", async (req, res) => {
 
 router.post("/verify-email", async (req, res) => {
   try {
-    const { userId, code } = req.body;
+    const { userId, code } = req.body || {};
 
     if (!userId || !code) {
       return res.status(400).json({
@@ -224,7 +246,7 @@ router.post("/verify-email", async (req, res) => {
 
     const hashedCode = crypto
       .createHash("sha256")
-      .update(code)
+      .update(code.toString())
       .digest("hex");
 
     if (hashedCode !== user.verificationCodeHash) {
@@ -241,7 +263,7 @@ router.post("/verify-email", async (req, res) => {
 
     const token = createToken(user);
 
-    res.json({
+    return res.json({
       message: "Email verified successfully",
       token,
       user: publicUser(user),
@@ -249,7 +271,7 @@ router.post("/verify-email", async (req, res) => {
   } catch (error) {
     console.error("Email verification error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Could not verify email",
     });
   }
@@ -261,7 +283,7 @@ router.post("/verify-email", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
     if (!email || !password) {
       return res.status(400).json({
@@ -269,8 +291,10 @@ router.post("/login", async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     const user = await User.findOne({
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
     });
 
     if (!user || !user.passwordHash) {
@@ -298,14 +322,14 @@ router.post("/login", async (req, res) => {
 
     const token = createToken(user);
 
-    res.json({
+    return res.json({
       token,
       user: publicUser(user),
     });
   } catch (error) {
     console.error("Login error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Login failed",
     });
   }
@@ -337,23 +361,25 @@ router.get("/me", async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       user: publicUser(user),
     });
   } catch (error) {
-    res.status(401).json({
+    return res.status(401).json({
       message: "Invalid or expired token",
     });
   }
 });
 
 /* -----------------------------
-   EMAIL
+   SEND VERIFICATION EMAIL
 ----------------------------- */
 
 async function sendVerificationEmail(email, code) {
   const transporter = nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASSWORD,
@@ -366,15 +392,18 @@ async function sendVerificationEmail(email, code) {
     subject: "Your Ananda verification code",
     text: `Your Ananda verification code is ${code}. It expires in 10 minutes.`,
     html: `
-      <div style="font-family: Arial, sans-serif;">
+      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto;">
         <h2>Welcome to Ananda 🌙</h2>
-        <p>Your verification code is:</p>
+
+        <p>Your Ananda verification code is:</p>
 
         <h1 style="letter-spacing: 8px;">
           ${code}
         </h1>
 
         <p>This code expires in 10 minutes.</p>
+
+        <p>If you did not create an Ananda account, you can ignore this email.</p>
       </div>
     `,
   });
