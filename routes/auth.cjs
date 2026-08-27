@@ -3,7 +3,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
-const nodemailer = require("nodemailer");
+
 
 const User = require("../models/User.cjs");
 
@@ -376,37 +376,69 @@ router.get("/me", async (req, res) => {
 ----------------------------- */
 
 async function sendVerificationEmail(email, code) {
-  const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD,
+  const apiKey = process.env.RESEND_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("RESEND_API_KEY is not configured");
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
     },
+    body: JSON.stringify({
+      from: "Ananda <onboarding@resend.dev>",
+      to: [email],
+      subject: "Your Ananda verification code",
+      html: `
+        <div style="
+          font-family: Arial, sans-serif;
+          max-width: 500px;
+          margin: 40px auto;
+          padding: 30px;
+          border-radius: 16px;
+          background: #f8f5f0;
+        ">
+          <h2 style="color: #333;">
+            Welcome to Ananda 🌙
+          </h2>
+
+          <p style="color: #555;">
+            Your Ananda verification code is:
+          </p>
+
+          <h1 style="
+            letter-spacing: 8px;
+            color: #333;
+            text-align: center;
+          ">
+            ${code}
+          </h1>
+
+          <p style="color: #777;">
+            This code expires in 10 minutes.
+          </p>
+
+          <p style="color: #999; font-size: 13px;">
+            If you did not create an Ananda account, you can ignore this email.
+          </p>
+        </div>
+      `,
+    }),
   });
 
-  await transporter.sendMail({
-    from: `"Ananda" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject: "Your Ananda verification code",
-    text: `Your Ananda verification code is ${code}. It expires in 10 minutes.`,
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto;">
-        <h2>Welcome to Ananda 🌙</h2>
+  const data = await response.json();
 
-        <p>Your Ananda verification code is:</p>
+  if (!response.ok) {
+    console.error("Resend API error:", data);
+    throw new Error(data.message || "Failed to send verification email");
+  }
 
-        <h1 style="letter-spacing: 8px;">
-          ${code}
-        </h1>
+  console.log("Verification email sent:", data.id);
 
-        <p>This code expires in 10 minutes.</p>
-
-        <p>If you did not create an Ananda account, you can ignore this email.</p>
-      </div>
-    `,
-  });
+  return data;
 }
 
 module.exports = router;
